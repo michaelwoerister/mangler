@@ -27,6 +27,172 @@ use std::char;
 
 type ParseResult = Result<(), String>;
 
+macro_rules! check_eof {
+    ($label:expr, $text:expr, $pos:expr) => {
+        if *$pos >= $text.len() {
+            return Err(format!("{}: unexpected EOF", $label));
+        }
+    };
+
+    ($label:expr, $text:expr, $pos:expr, $len:expr) => {
+        if *$pos + $len > $text.len() {
+            return Err(format!("{}: unexpected EOF", $label));
+        }
+    };
+}
+
+fn parse_name(text: &[u8], pos: &mut usize, output: &mut String) -> ParseResult {
+    check_eof!("parse_name", text, pos);
+
+    if text[*pos] == b'N' {
+        parse_nested_name(text, pos, output)
+    } else {
+        try!(parse_unqualified_name(text, pos, output));
+        if *pos < text.len() && text[*pos] == b'I' {
+            parse_template_args(text, pos, output)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+fn parse_nested_name(text: &[u8], pos: &mut usize, output: &mut String) -> ParseResult {
+    check_eof!("parse_nested_name", text, pos);
+
+    if text[*pos] != b'N' {
+        return Err(format!("parse_nested_name: Expected 'N', found '{}'",
+                           text[*pos] as char));
+    } else {
+        *pos += 1;
+        check_eof!("parse_nested_name", text, pos);
+    }
+
+    while text[*pos] != b'E' {
+        check_eof!("parse_nested_name", text, pos);
+
+        try!(parse_unqualified_name(text, pos, output));
+
+        if text[*pos] == b'I' {
+            try!(parse_template_args(text, pos, output));
+        }
+
+        if text[*pos] != b'E' {
+            output.push_str("::");
+        }
+    }
+
+    // Eat the 'E'
+    *pos += 1;
+
+    Ok(())
+}
+
+fn parse_template_args(text: &[u8], pos: &mut usize, output: &mut String) -> ParseResult {
+    check_eof!("parse_template_args", text, pos);
+
+    if text[*pos] != b'I' {
+        return Err(format!("parse_template_args: Expected 'I', found '{}'",
+                           text[*pos] as char));
+    }
+
+    *pos += 1;
+    check_eof!("parse_template_args", text, pos);
+    output.push_str("<");
+
+    while text[*pos] != b'E' {
+        try!(parse_template_arg(text, pos, output));
+
+        check_eof!("parse_template_args", text, pos);
+
+        if text[*pos] != b'E' {
+            output.push_str(",");
+        }
+    }
+
+    // Eat the 'E'
+    *pos += 1;
+    output.push_str(">");
+
+    Ok(())
+}
+
+fn parse_template_arg(text: &[u8], pos: &mut usize, output: &mut String) -> ParseResult {
+    check_eof!("parse_template_arg", text, pos);
+
+    match text[*pos] {
+        b'X' => parse_expression(text, pos, output),
+        b'L' => parse_expr_primary(text, pos, output),
+        _ => parse_type(text, pos, output),
+    }
+}
+
+fn parse_type(text: &[u8], pos: &mut usize, output: &mut String) -> ParseResult {
+    check_eof!("parse_type", text, pos);
+
+    if text[*pos] == b'N' || is_digit(text[*pos]) {
+        parse_name(text, pos, output)
+    } else {
+        parse_builtin_type(text, pos, output)
+    }
+}
+
+fn parse_builtin_type(text: &[u8], pos: &mut usize, output: &mut String) -> ParseResult {
+    Ok(())
+}
+
+fn parse_expression(text: &[u8], pos: &mut usize, output: &mut String) -> ParseResult {
+    check_eof!("parse_expression", text, pos);
+
+    if text[*pos] != b'X' {
+        return Err(format!("parse_expression: Expected 'X', found '{}'",
+                           text[*pos] as char));
+    } else {
+        *pos += 1;
+        check_eof!("parse_expression", text, pos);
+    }
+
+    check_eof!("parse_expression", text, pos);
+
+    if text[*pos] == b'L' {
+        parse_expr_primary(text, pos, output)
+    } else {
+        if let Some((label, op_kind)) = try_parse_operator_name(text, pos) {
+            match op_kind {
+                OpKind::Prefix => {
+                    output.push_str(label);
+                    parse_expression(text, pos, output)
+                }
+                OpKind::Infix => {
+                    try!(parse_expression(text, pos, output));
+                    output.push_str(label);
+                    parse_expression(text, pos, output)
+                }
+                OpKind::Postfix => {
+                    try!(parse_expression(text, pos, output));
+                    output.push_str(label);
+                    Ok(())
+                }
+            }
+        } else {
+            Err("parse_expression: Not an expression!".to_owned())
+        }
+    }
+}
+
+fn parse_expr_primary(text: &[u8], pos: &mut usize, output: &mut String) -> ParseResult {
+    Ok(())
+}
+
+fn parse_unqualified_name(text: &[u8], pos: &mut usize, output: &mut String) -> ParseResult {
+    check_eof!("parse_unqualified_name", text, pos);
+
+    if is_digit(text[*pos]) {
+        return parse_source_name(text, pos, output);
+    }
+
+    Ok(())
+}
+
 fn parse_source_name(text: &[u8], pos: &mut usize, output: &mut String) -> ParseResult {
     let name_len = try!(parse_int(text, pos));
 
@@ -41,10 +207,7 @@ fn parse_source_name(text: &[u8], pos: &mut usize, output: &mut String) -> Parse
 }
 
 fn parse_int(text: &[u8], pos: &mut usize) -> Result<usize, String> {
-
-    if *pos >= text.len() {
-        return Err("parse_int: unexpected EOF".to_owned());
-    }
+    check_eof!("parse_int", text, pos);
 
     if !is_digit(text[*pos]) {
         return Err(format!("parse_int: unexpected character '{}'",
@@ -60,13 +223,73 @@ fn parse_int(text: &[u8], pos: &mut usize) -> Result<usize, String> {
     Ok(value)
 }
 
+enum OpKind {
+    Infix,
+    Prefix,
+    Postfix,
+}
+
+fn try_parse_operator_name(text: &[u8], pos: &mut usize) -> Option<(&'static str, OpKind)> {
+    if *pos >= text.len() {
+        return None;
+    }
+
+    let (label, op_kind) = match &text[*pos..*pos + 2] {
+        b"ps" => ("+", OpKind::Prefix), // + (unary)
+        b"ng" => ("-", OpKind::Prefix), // - (unary)
+        b"ad" => ("&", OpKind::Prefix), // & (unary)
+        b"de" => ("*", OpKind::Prefix), // * (unary)
+        b"co" => ("~", OpKind::Prefix), // ~
+        b"pl" => ("+", OpKind::Infix), // +
+        b"mi" => ("-", OpKind::Infix), // -
+        b"ml" => ("*", OpKind::Infix), // *
+        b"dv" => ("/", OpKind::Infix), // /
+        b"rm" => ("%", OpKind::Infix), // %
+        b"an" => ("&", OpKind::Infix), // &
+        b"or" => ("|", OpKind::Infix), // |
+        b"eo" => ("^", OpKind::Infix), // ^
+        b"aS" => ("=", OpKind::Infix), // =
+        b"pL" => ("+=", OpKind::Infix), // +=
+        b"mI" => ("-=", OpKind::Infix), // -=
+        b"mL" => ("*=", OpKind::Infix), // *=
+        b"dV" => ("/=", OpKind::Infix), // /=
+        b"rM" => ("%=", OpKind::Infix), // %=
+        b"aN" => ("&=", OpKind::Infix), // &=
+        b"oR" => ("|=", OpKind::Infix), // |=
+        b"eO" => ("^=", OpKind::Infix), // ^=
+        b"ls" => ("<<", OpKind::Infix), // <<
+        b"rs" => (">>", OpKind::Infix), // >>
+        b"lS" => ("<<=", OpKind::Infix), // <<=
+        b"rS" => (">>=", OpKind::Infix), // >>=
+        b"eq" => ("==", OpKind::Infix), // ==
+        b"ne" => ("!=", OpKind::Infix), // !=
+        b"lt" => ("<", OpKind::Infix), // <
+        b"gt" => (">", OpKind::Infix), // >
+        b"le" => ("<=", OpKind::Infix), // <=
+        b"ge" => (">=", OpKind::Infix), // >=
+        b"nt" => ("!", OpKind::Prefix), // !
+        b"aa" => ("&&", OpKind::Infix), // &&
+        b"oo" => ("&&", OpKind::Infix), // ||
+        b"pp" => ("++", OpKind::Postfix), // ++ (postfix in <expression> context)
+        b"mm" => ("--", OpKind::Postfix), // -- (postfix in <expression> context)
+        b"cm" => (",", OpKind::Infix), // ,
+        b"pm" => ("->*", OpKind::Infix), // ->*
+        b"pt" => ("->", OpKind::Infix), // ->
+        _ => return None,
+    };
+
+    *pos += 2;
+    Some((label, op_kind))
+}
+
 fn is_digit(c: u8) -> bool {
     c >= b'0' && c <= b'9'
 }
 
+
 #[cfg(test)]
 mod test {
-    use super::{parse_int, parse_source_name};
+    use super::{parse_int, parse_source_name, parse_nested_name};
 
     #[test]
     fn test_parse_int() {
@@ -151,5 +374,16 @@ mod test {
                       "",
                       Err(format!("parse_source_name: unexpected EOF")));
         assert_parse!(b"0a", parse_source_name, "", Ok(()));
+    }
+
+    #[test]
+    fn test_parse_nested_name() {
+        assert_parse!(b"NE", parse_nested_name, "", Ok(()));
+        assert_parse!(b"N3abcE", parse_nested_name, "abc", Ok(()));
+        assert_parse!(b"N3abc4defgE", parse_nested_name, "abc::defg", Ok(()));
+        assert_parse!(b"N3abcI3xyzE4defgE",
+                      parse_nested_name,
+                      "abc<xyz>::defg",
+                      Ok(()));
     }
 }
